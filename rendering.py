@@ -9,11 +9,11 @@ FORMATS = {'story': ('Сторис · 1080 × 1920', (1080, 1920)),
            'post': ('Пост ВК · 1080 × 1350', (1080, 1350)),
            'a4': ('A4 · 3508 × 2480', (3508, 2480))}
 PALETTES = {
-    'Светлый': {'bg': '#F4F2F8', 'card': '#FFFFFF', 'text': '#262237', 'muted': '#827B94',
-                'line': '#EAE5F0', 'accent': '#8260B2', 'green': '#D5F0B2', 'purple': '#DFD0F7',
+    'Светлый': {'bg': '#F4F2F8', 'card': '#FFFFFF', 'text': '#262237', 'muted': '#59536A',
+                'line': '#EAE5F0', 'accent': '#7955AA', 'green': '#D5F0B2', 'purple': '#DFD0F7',
                 'day': '#E9E0F4', 'day_text': '#63507D', 'green_text': '#304526',
                 'purple_text': '#493366', 'shadow': '#E8E2EF', 'time': '#EAE5F1'},
-    'Тёмный': {'bg': '#161522', 'card': '#211F31', 'text': '#FAF8FF', 'muted': '#A49DB7',
+    'Тёмный': {'bg': '#161522', 'card': '#211F31', 'text': '#FAF8FF', 'muted': '#C7C1D4',
                'line': '#302B43', 'accent': '#C8ADF0', 'green': '#C2E99C', 'purple': '#CFB6F5',
                'day': '#342A48', 'day_text': '#E6D9FA', 'green_text': '#2D4226',
                'purple_text': '#3F2C5E', 'shadow': '#11101B', 'time': '#2C273D'},
@@ -88,6 +88,30 @@ def centered_text(draw, lines, box, face, fill, line_height):
                    face, fill, line_height, 'ls')
 
 
+def centered_session(draw, title_lines, detail_lines, box, face, fill, line_height):
+    if not detail_lines:
+        centered_text(draw, title_lines, box, face, fill, line_height)
+        return
+    small = font(max(6, face.size * .82))
+    small_height = round(small.size * 1.24)
+    lines = [(line, face, line_height) for line in title_lines]
+    lines += [(line, small, small_height) for line in detail_lines]
+    positioned, baseline = [], 0
+    for index, (line, current_face, height) in enumerate(lines):
+        if index == len(title_lines):
+            baseline += round(face.size * .22)
+        bounds = draw.textbbox((0, 0), line, font=current_face, anchor='ls')
+        positioned.append((line, current_face, height, baseline, bounds))
+        baseline += height
+    top = min(y + bounds[1] for _, _, _, y, bounds in positioned)
+    bottom = max(y + bounds[3] for _, _, _, y, bounds in positioned)
+    x0, y0, x1, y1 = box
+    start = (y0 + y1 - top - bottom) / 2
+    for line, current_face, height, y, bounds in positioned:
+        x = (x0 + x1 - bounds[0] - bounds[2]) / 2
+        text_lines(draw, [line], x, start + y, current_face, fill, height, 'ls')
+
+
 def open_asset(path):
     try:
         with Image.open(path) as source:
@@ -109,7 +133,8 @@ def canvas(project, variant, size):
 
 
 def header(image, project, palette, scale):
-    draw = ImageDraw.Draw(image)
+    surface = Image.new('RGBA', image.size)
+    draw = ImageDraw.Draw(surface)
     width, _ = image.size
     margin = round(42 * scale)
     start_y = round(40 * scale)
@@ -147,8 +172,8 @@ def header(image, project, palette, scale):
         inset = round(12 * scale)
         logo = ImageOps.contain(logo, (logo_size - 2 * inset, logo_size - 2 * inset),
                                 Image.Resampling.LANCZOS)
-        image.paste(logo, (round(margin + (logo_size - logo.width) / 2),
-                           round(logo_y + (logo_size - logo.height) / 2)), logo)
+        surface.alpha_composite(logo, (round(margin + (logo_size - logo.width) / 2),
+                                       round(logo_y + (logo_size - logo.height) / 2)))
         y = max(y, logo_y + logo_size)
     if project.period_text():
         y += round(20 * scale)
@@ -161,7 +186,20 @@ def header(image, project, palette, scale):
         text_lines(draw, lines, text_x + 16 * scale, y + 10 * scale,
                    face, palette['day_text'], round(26 * scale))
         y += badge_height
-    return y + round(32 * scale)
+    bottom = y + round(32 * scale)
+    if has_background(project):
+        # A solid local surface guarantees contrast, even over a bright photograph
+        # with 100% background visibility. The rest of the background is untouched.
+        ImageDraw.Draw(image).rounded_rectangle(
+            (max(0, margin - 18 * scale), max(0, start_y - 18 * scale),
+             width - max(0, margin - 18 * scale), bottom - 12 * scale),
+            radius=18 * scale, fill=palette['bg'])
+    image.paste(surface, (0, 0), surface)
+    return bottom
+
+
+def has_background(project):
+    return any(project.style.get(key) for key in ('bg_common', 'bg_story', 'bg_post', 'bg_a4'))
 
 
 def legend_layout(project, width, scale):
@@ -195,6 +233,10 @@ def footer(image, project, palette, page, total, scale):
     w, h = image.size
     margin = round(52 * scale)
     y = h - footer_height(project, w, scale) + round(12 * scale)
+    if has_background(project):
+        draw.rounded_rectangle((margin - 18 * scale, y - 12 * scale,
+                                w - margin + 18 * scale, h - 8 * scale),
+                               radius=18 * scale, fill=palette['bg'])
     draw.line((margin, y, w - margin, y), fill=palette['line'], width=max(1, round(scale)))
     y += round(20 * scale)
     entries, legend_height = legend_layout(project, w, scale)
@@ -335,7 +377,11 @@ def weekly_grid(project, variant):
                 bx0, by0, bx1, by1 = block['box']
                 color = project.halls[hall]['color']
                 draw.rounded_rectangle(block['box'], radius=round(11 * scale), fill=color)
-                centered_text(draw, lines, block['box'], face, text_color(color), line_height)
+                day = project.days[column]
+                title = project.get(day, row['time'], project.hall_ids[hall])
+                title_lines = wrap(draw, title, face, column_width - padding * 4)
+                centered_session(draw, title_lines, lines[len(title_lines):], block['box'],
+                                 face, text_color(color), line_height)
             # Short, faint ticks retain the time rhythm in empty cells, without boxing them in.
             if not blocks:
                 cy = y + height / 2

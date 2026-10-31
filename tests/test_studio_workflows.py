@@ -80,7 +80,8 @@ class StudioModelTests(unittest.TestCase):
             self.assertNotIn('60 мин', text)
             self.assertEqual(self.p.session_text(DAY, '18:00', self.hall), 'Йога')
         self.p.options.update(trainer=2, duration=2)
-        self.assertIn('Анна · 60 мин', self.p.publication_text())
+        self.assertEqual(self.p.session_text(DAY, '18:00', self.hall), 'Йога\nАнна\n60 мин')
+        self.assertIn('    Анна\n    60 мин', self.p.publication_text())
 
     def test_conflicts_known_duration_and_optional_trainer(self):
         self.p.options.update(trainer=1, duration=1)

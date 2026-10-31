@@ -14,8 +14,8 @@ class StudioWorkflows:
         layout.setContentsMargins(14, 12, 14, 12)
         row = Q.QHBoxLayout()
         self.week_mode = Q.QComboBox()
-        self.week_mode.addItems(['Обычное расписание', 'Неделя по датам'])
-        self.week_mode.setToolTip('Обычное расписание — шаблон для новых недель')
+        self.week_mode.addItems(['Каждую неделю · без периода', 'Разовые изменения · неделя', 'Весь месяц · каждую неделю'])
+        self.week_mode.setToolTip('На месяц: одна сетка повторяется весь месяц. Разовые изменения — исключения на выбранные даты.')
         self.week_mode.currentIndexChanged.connect(self.change_week_mode)
         row.addWidget(self.week_mode)
         self.week_previous = Q.QPushButton('‹')
@@ -33,6 +33,18 @@ class StudioWorkflows:
         self.week_next.clicked.connect(lambda: self.navigate_week(7))
         row.addWidget(self.week_next)
         row.addStretch()
+        self.month_date = Q.QDateEdit()
+        self.month_date.setDisplayFormat('MMMM yyyy')
+        self.month_date.setLocale(QtCore.QLocale('ru_RU'))
+        self.month_date.setDate(QtCore.QDate.currentDate())
+        self.month_date.dateChanged.connect(self.select_month)
+        row.addWidget(self.month_date)
+        self.next_month_btn = Q.QPushButton('Скопировать на следующий месяц')
+        self.next_month_btn.clicked.connect(self.copy_next_month)
+        row.addWidget(self.next_month_btn)
+        self.exception_btn = Q.QPushButton('Разовое изменение…')
+        self.exception_btn.clicked.connect(self.month_exception)
+        row.addWidget(self.exception_btn)
         layout.addLayout(row)
         self.week_hint = Q.QLabel()
         self.week_hint.setObjectName('muted')
@@ -55,10 +67,17 @@ class StudioWorkflows:
 
     def refresh_week_controls(self):
         active = bool(self.project.active_week)
-        self.style_fields['period'].setEnabled(not active)
+        month = bool(self.project.active_month)
+        self.schedule_heading.setText('Расписание на месяц' if month else 'Разовые изменения' if active else 'Повторяющееся расписание')
+        self.style_fields['period'].setEnabled(not (active or month))
         self.style_fields['period'].setText(self.project.period_text())
         self.style_fields['period'].setToolTip('Даты выбранной недели подставляются автоматически.' if active else '')
-        self.week_mode.setCurrentIndex(1 if active else 0)
+        self.from_template_btn.setText('Вернуть сетку месяца' if self.project.active_week in self.project.week_sources else 'Взять постоянный шаблон')
+        self.week_mode.setCurrentIndex(2 if month else 1 if active else 0)
+        if month:
+            self.month_date.setDate(QtCore.QDate.fromString(self.project.active_month, 'yyyy-MM-dd'))
+        for widget in (self.month_date, self.next_month_btn, self.exception_btn):
+            widget.setVisible(month)
         if active:
             self.week_date.setDate(QtCore.QDate.fromString(self.project.active_week, 'yyyy-MM-dd'))
         for widget in (self.week_date, self.week_previous, self.week_next,
@@ -66,6 +85,7 @@ class StudioWorkflows:
             widget.setEnabled(active)
             widget.setVisible(active)
         self.week_hint.setText(
+            self.project.period_text() + '. Одна сетка на весь месяц; для отмен и переносов нажмите «Разовое изменение».' if month else
             self.project.period_text() + ' · Изменения действуют только в этой неделе.' if active else
             'Повторяющаяся неделя. Новые недели создаются из этого шаблона; уже открытые недели сохраняются отдельно.')
         self.week_archive.clear()
@@ -75,16 +95,66 @@ class StudioWorkflows:
             self.week_archive.addItem(value.toString('dd.MM.yyyy') + ' — ' + value.addDays(6).toString('dd.MM.yyyy'), key)
         self.week_archive.setEnabled(self.week_archive.count() > 1)
         self.week_archive.setVisible(self.week_archive.count() > 1)
-        for key, combo in self.option_fields.items():
-            combo.setCurrentIndex(self.project.options[key])
+        for fields in (self.option_fields, self.editor_option_fields):
+            for key, combo in fields.items():
+                combo.setCurrentIndex(self.project.options[key])
 
     def select_archived_week(self, index):
         if not self.loading and self.week_archive.itemData(index):
             self.open_week(self.week_archive.itemData(index))
 
     def change_week_mode(self, index):
-        if not self.loading:
-            self.open_week(self.week_date.date().toString('yyyy-MM-dd') if index else '')
+        if self.loading:
+            return
+        if index == 2:
+            self.open_month(self.month_date.date().toString('yyyy-MM-dd'))
+        else:
+            self.open_week((self.project.active_month or self.week_date.date().toString('yyyy-MM-dd')) if index else '')
+
+    def select_month(self, value):
+        if not self.loading and self.week_mode.currentIndex() == 2:
+            self.open_month(value.toString('yyyy-MM-dd'))
+
+    def open_month(self, key, copy_current=False):
+        if self.project.active_month == self.project.month_key(key):
+            return
+        self.remember()
+        # On first adopting a month, keep the schedule the user is looking at.
+        # Existing months always restore their own saved state.
+        use_current = copy_current or (not self.project.months and not self.project.active_month)
+        self.project.switch_month(key, use_current)
+        self.changed(refresh=True)
+
+    def copy_next_month(self):
+        if not self.project.active_month:
+            return
+        next_date = QtCore.QDate.fromString(self.project.active_month, 'yyyy-MM-dd').addMonths(1)
+        key = next_date.toString('yyyy-MM-dd')
+        if key in self.project.months and not self.confirm('Заменить следующий месяц?',
+                'Там уже есть расписание. Заменить его текущим? Изменение можно отменить.'):
+            return
+        self.open_month(key, copy_current=True)
+
+    def month_exception(self):
+        first = QtCore.QDate.fromString(self.project.active_month, 'yyyy-MM-dd')
+        dialog = Q.QDialog(self)
+        dialog.setWindowTitle('Разовое изменение в месяце')
+        form = Q.QFormLayout(dialog)
+        hint = Q.QLabel('Выберите дату. Откроется её неделя для переноса или отмены. Основное расписание месяца останется прежним.')
+        hint.setWordWrap(True)
+        form.addRow(hint)
+        value = Q.QDateEdit(first)
+        value.setCalendarPopup(True)
+        value.setDisplayFormat('dd.MM.yyyy')
+        value.setDateRange(first, first.addMonths(1).addDays(-1))
+        form.addRow('Дата', value)
+        buttons = Q.QDialogButtonBox(Q.QDialogButtonBox.Ok | Q.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() == Q.QDialog.Accepted:
+            self.open_week(value.date().toString('yyyy-MM-dd'))
+
 
     def select_week(self, value):
         if not self.loading and self.week_mode.currentIndex():
@@ -95,7 +165,7 @@ class StudioWorkflows:
 
     def open_week(self, key):
         normalized = self.project.monday(key) if key else ''
-        if self.project.active_week == normalized:
+        if self.project.active_week == normalized and not self.project.active_month:
             return
         self.remember()
         self.project.switch_week(key)
@@ -145,13 +215,65 @@ class StudioWorkflows:
         self.project.options[key] = value
         self.changed(refresh=True)
 
+    def editor_options(self):
+        row = Q.QHBoxLayout()
+        self.editor_option_fields = {}
+        for key, title in [('trainer', 'Тренер'), ('duration', 'Длительность')]:
+            row.addWidget(Q.QLabel(title))
+            combo = Q.QComboBox()
+            combo.addItems(['Не использовать', 'Вижу только я', 'Показывать клиентам'])
+            combo.currentIndexChanged.connect(lambda value, k=key: self.change_option(k, value))
+            self.editor_option_fields[key] = combo
+            row.addWidget(combo)
+        row.addStretch()
+        return row
+
+    def save_inline_detail(self, day, time, hall, trainer, duration):
+        if self.loading or not self.project.get(day, time, hall):
+            return
+        if duration and int(time[:2]) * 60 + int(time[3:]) + duration > 1440:
+            Q.QMessageBox.warning(self, 'Длительность', 'Занятие должно завершиться в пределах дня.')
+            self.refresh_all()
+            return
+        detail = {'trainer': trainer.strip(), 'duration': duration}
+        if detail == self.project.detail(day, time, hall):
+            return
+        self.remember()
+        self.project.set_detail(day, time, hall, **detail)
+        self.changed()
+
+    def move_inline_session(self, day, old_time, hall, new_time):
+        if self.loading or new_time == old_time or not self.project.get(day, old_time, hall):
+            return
+        if self.project.get(day, new_time, hall):
+            Q.QMessageBox.warning(self, 'Время занято', 'В этом зале уже есть занятие в выбранное время.')
+            self.refresh_all()
+            return
+        name = self.project.get(day, old_time, hall)
+        detail = dict(self.project.detail(day, old_time, hall))
+        if detail.get('duration', 0) and self.project.options['duration'] and int(new_time[:2]) * 60 + int(new_time[3:]) + detail['duration'] > 1440:
+            Q.QMessageBox.warning(self, 'Начало занятия', 'Занятие должно завершиться в пределах дня.')
+            self.refresh_all()
+            return
+        self.remember()
+        self.project.set(day, old_time, hall, '')
+        if new_time not in self.project.times:
+            self.project.times = sorted([*self.project.times, new_time])
+        self.project.set(day, new_time, hall, name)
+        self.project.set_detail(day, new_time, hall, **detail)
+        self.changed(refresh=True)
+
     def update_conflicts(self):
         warnings = self.project.conflicts()
+        missing_duration = any(not self.project.detail(d, t, h).get('duration')
+                               for d in self.project.days for t in self.project.times for h in self.project.hall_ids
+                               if self.project.get(d, t, h))
         self.conflict_label.setText(
             '⚠ Проверьте пересечения: ' + ' '.join(warnings[:3]) if warnings else
-            ('Пересечений не найдено. Для проверки интервалов укажите длительность занятий.'
+            (('Пересечений не найдено. Для полной проверки укажите длительность всех занятий.' if missing_duration
+              else 'Пересечений в расписании не найдено.')
              if self.project.options['duration'] else
-             'Тренер и длительность необязательны. Настроить их можно во вкладке «Студия и залы».'))
+             'Тренер и длительность необязательны. Включите нужные поля над таблицей.'))
         self.conflict_label.setProperty('warning', bool(warnings))
         self.conflict_label.style().unpolish(self.conflict_label)
         self.conflict_label.style().polish(self.conflict_label)

@@ -294,7 +294,8 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
         layout = Q.QVBoxLayout(page)
         layout.setContentsMargins(0, 18, 12, 0)
         row = Q.QHBoxLayout()
-        row.addWidget(label('Неделя', 'section'))
+        self.schedule_heading = label('Расписание', 'section')
+        row.addWidget(self.schedule_heading)
         row.addStretch()
         self.count_label = label('', 'muted')
         self.count_label.setWordWrap(False)
@@ -328,6 +329,7 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
         layout.addLayout(tools)
         self.hall_legend = label('', 'muted')
         layout.addWidget(self.hall_legend)
+        layout.addLayout(self.editor_options())
         self.table = Q.QTableWidget()
         self.table.setSelectionMode(Q.QAbstractItemView.SingleSelection)
         self.table.setSelectionBehavior(Q.QAbstractItemView.SelectRows)
@@ -339,7 +341,7 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
         bottom = Q.QHBoxLayout()
         bottom.addWidget(label('Занятия и оформление сохраняются автоматически.', 'muted'))
         bottom.addStretch()
-        clear = button('Очистить неделю…', self.clear_week)
+        clear = button('Очистить сетку…', self.clear_week)
         clear.setObjectName('danger')
         bottom.addWidget(clear)
         layout.addLayout(bottom)
@@ -726,8 +728,9 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
         self.table.setVerticalHeaderLabels(self.project.times)
         self.table.horizontalHeader().setMinimumSectionSize(145)
         self.table.horizontalHeader().setSectionResizeMode(Q.QHeaderView.Stretch)
-        self.table.verticalHeader().setDefaultSectionSize(max(78, 14 + len(self.project.halls) * 62))
+        self.table.verticalHeader().setDefaultSectionSize(14 + len(self.project.halls) * (100 + (36 if self.project.options['trainer'] else 0)))
         self.cell_combos = {}
+        self.cell_details = {}
         for column, day in enumerate(self.project.days):
             self.table.setColumnWidth(column, 200)
             for row, time in enumerate(self.project.times):
@@ -763,10 +766,50 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
                     line.addWidget(edit)
                     layout.addLayout(line)
                     self.cell_combos[(day, time, hall)] = combo
+                    self.add_inline_fields(layout, day, time, hall)
                 self.table.setCellWidget(row, column, cell)
         if not self.project.trainings:
             self.statusBar().showMessage('Начните с вкладки «Тренировки» или загрузите пример в меню «Проект».')
         self.filter_rows()
+
+    def add_inline_fields(self, layout, day, time, hall):
+        detail = self.project.detail(day, time, hall)
+        trainer = Q.QLineEdit(detail.get('trainer', ''))
+        trainer.setMaxLength(80)
+        trainer.setPlaceholderText('Имя тренера')
+        trainer.setToolTip('Виден только вам' if self.project.options['trainer'] == 1 else 'Отдельная строка под названием на картинке')
+        trainer.setVisible(bool(self.project.options['trainer']))
+        if self.project.options['trainer']:
+            layout.addWidget(trainer)
+        else:
+            trainer.setParent(layout.parentWidget())
+            trainer.hide()
+        row = Q.QHBoxLayout()
+        row.setSpacing(3)
+        start = Q.QTimeEdit(QtCore.QTime.fromString(time, 'HH:mm'))
+        start.setDisplayFormat('HH:mm')
+        start.setToolTip('Время начала · можно изменить здесь')
+        start.setMinimumWidth(62)
+        row.addWidget(start)
+        duration = Q.QSpinBox()
+        duration.setRange(0, 720)
+        duration.setSpecialValueText('— мин')
+        duration.setSuffix(' мин')
+        duration.setValue(detail.get('duration', 0))
+        duration.setToolTip('Длительность · только для себя' if self.project.options['duration'] == 1 else 'Длительность · отдельная строка на картинке')
+        if self.project.options['duration']:
+            row.addWidget(duration)
+        else:
+            duration.setParent(layout.parentWidget())
+            duration.hide()
+        layout.addLayout(row)
+        enabled = bool(self.project.get(day, time, hall))
+        for widget in (trainer, start, duration):
+            widget.setEnabled(enabled)
+        trainer.editingFinished.connect(lambda: self.save_inline_detail(day, time, hall, trainer.text(), duration.value()))
+        duration.editingFinished.connect(lambda: self.save_inline_detail(day, time, hall, trainer.text(), duration.value()))
+        start.editingFinished.connect(lambda: self.move_inline_session(day, time, hall, start.time().toString('HH:mm')))
+        self.cell_details[(day, time, hall)] = (trainer, duration, start)
 
     def filter_rows(self):
         for row, time in enumerate(self.project.times):
@@ -788,6 +831,11 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
         self.project.set(day, time, hall, name)
         combo = self.cell_combos[(day, time, hall)]
         combo.setToolTip(f'{self.project.hall(hall)["name"]} · {day} · {time}\n{name or "Нет занятия"}')
+        for widget in self.cell_details[(day, time, hall)]:
+            widget.setEnabled(bool(name))
+        trainer, duration, start = self.cell_details[(day, time, hall)]
+        trainer.setText('')
+        duration.setValue(0)
         self.changed()
 
     def change_style(self, key, value, refresh=False):
@@ -917,7 +965,7 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
             self.changed(refresh=True)
 
     def clear_week(self):
-        if self.confirm('Очистить расписание?', 'Удалить занятия всех семи дней? Названия тренировок, время и оформление останутся. Действие можно отменить.'):
+        if self.confirm('Очистить выбранное расписание?', 'Удалить занятия из текущей сетки? В режиме месяца это изменит повторяющееся расписание выбранного месяца. Другие месяцы, отдельные недели и библиотека тренировок останутся. Действие можно отменить.'):
             self.remember()
             self.project.schedule.clear()
             self.project.details.clear()
@@ -1170,7 +1218,7 @@ def main():
     app.setOrganizationName(APP_ORG)
     app.setApplicationName(APP_ID)
     app.setApplicationDisplayName('Студия расписаний')
-    app.setApplicationVersion('3.0.0')
+    app.setApplicationVersion('3.1.0')
     app.setStyle('Fusion')
     app.setPalette(light_palette())
     try:
