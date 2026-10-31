@@ -259,43 +259,102 @@ class InlineTests(unittest.TestCase):
 
 
 class BackgroundContrastTests(unittest.TestCase):
-    def test_header_and_footer_have_feathered_readable_text_over_any_photo(self):
+    def test_adaptive_ink_reads_both_themes_photos_and_opacity_extremes(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'background.png'
             for background in ('#FFFFFF', '#000000'):
                 Image.new('RGB', (40, 40), background).save(path)
                 for theme in ('Светлый', 'Тёмный'):
-                    p = simple_project()
-                    p.style.update(palette=theme, bg_common=str(path), bg_transparency=100,
-                                   panel_transparency=100, subtitle='Адрес студии', contact='Запись на занятия')
-                    protected, text = [], []
-                    original_veil = rendering.contrast_veil
-                    original_text = rendering.text_lines
-                    def veil(image, bounds, scale):
-                        original_veil(image, bounds, scale)
-                        protected.append(image.copy())
-                    def capture(draw, lines, x, y, face, fill, height, anchor='lt'):
-                        for index, line in enumerate(lines):
-                            if line in ('Расписание занятий', 'Адрес студии', 'Зелёный зал', 'Запись на занятия'):
-                                box = draw.textbbox((x, y + index * height), line, font=face, anchor=anchor)
-                                text.append((line, box, fill))
-                            self.assertNotIn('STUDIO PLANNER', line)
-                        return original_text(draw, lines, x, y, face, fill, height, anchor)
-                    with patch.object(rendering, 'contrast_veil', side_effect=veil), patch.object(rendering, 'text_lines', side_effect=capture):
-                        image = rendering.render(p, 'post')[0]
-                    self.assertEqual(len(protected), 2)
-                    self.assertEqual(protected[0].getpixel((image.width - 5, 40)), rgb(background))
-                    def luminance(channels):
-                        values = [v / 255 for v in channels]
-                        values = [v / 12.92 if v <= .04045 else ((v + .055) / 1.055) ** 2.4 for v in values]
-                        return sum(v * weight for v, weight in zip(values, (.2126, .7152, .0722)))
-                    self.assertEqual(len(text), 4)
-                    for line, (x0, y0, x1, y1), fill in text:
-                        backing = protected[1] if line in ('Зелёный зал', 'Запись на занятия') else protected[0]
-                        for x, y in ((x0, y0), ((x0 + x1) / 2, (y0 + y1) / 2), (x1 - 1, y1 - 1)):
-                            values = (luminance(rgb(fill)), luminance(backing.getpixel((round(x), round(y)))))
-                            light, dark = sorted(values, reverse=True)
-                            self.assertGreaterEqual((light + .05) / (dark + .05), 4.5, (line, theme, background))
+                    for transparency in (0, 100):
+                        p = simple_project()
+                        p.style.update(palette=theme, bg_common=str(path), bg_transparency=transparency)
+                        image, palette = rendering.canvas(p, 'post', (100, 100))
+                        original = image.copy()
+                        for key in ('text', 'muted', 'accent'):
+                            fill, outline = rendering.adaptive_ink(image, (10, 10, 90, 80), palette[key])
+                            self.assertGreaterEqual(rendering.contrast_ratio(rgb(fill), image.getpixel((50, 50))), 4.5)
+                            self.assertIsNone(outline)
+                        self.assertEqual(image.tobytes(), original.tobytes())
+
+    def test_busy_photo_uses_a_fine_glyph_outline_instead_of_a_panel(self):
+        from PIL import ImageDraw
+        image = Image.new('RGB', (200, 50), '#FFFFFF')
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((100, 0, 200, 50), fill='#000000')
+        fill, outline = rendering.adaptive_ink(image, (0, 0, 200, 50), '#827B94')
+        self.assertIsNotNone(outline)
+        self.assertGreaterEqual(rendering.contrast_ratio(rgb(fill), rgb(outline)), 4.5)
+        draw.contrast_background = image
+        with patch.object(draw, 'text', wraps=draw.text) as paint:
+            rendering.text_lines(draw, ['Текст на фотографии'], 10, 10, rendering.font(18), '#827B94', 24)
+        self.assertIn('stroke_fill', paint.call_args.kwargs)
+        self.assertLessEqual(paint.call_args.kwargs['stroke_width'], 2)
+
+    def test_header_and_footer_change_only_glyphs_without_whitening_background(self):
+        from PIL import ImageChops, ImageDraw, ImageOps
+        for theme in ('Светлый', 'Тёмный'):
+            for color in ('#FFFFFF', '#000000'):
+                p = simple_project()
+                p.style.update(palette=theme, subtitle='Адрес студии', contact='Запись на занятия', period='')
+                for operation in ('header', 'footer'):
+                    image = Image.new('RGB', (1080, 1350), color)
+                    original = image.copy()
+                    allowed = Image.new('L', image.size)
+                    marking = ImageDraw.Draw(allowed)
+                    actual_draw = ImageDraw.Draw(image)
+                    original_text = ImageDraw.ImageDraw.text
+                    def paint(draw, xy, text, *args, **kwargs):
+                        face = kwargs.get('font')
+                        anchor = kwargs.get('anchor', 'lt')
+                        x0, y0, x1, y1 = draw.textbbox(xy, text, font=face, anchor=anchor)
+                        width = kwargs.get('stroke_width', 0) + 1
+                        marking.rectangle((x0-width, y0-width, x1+width, y1+width), fill=255)
+                        return original_text(draw, xy, text, *args, **kwargs)
+                    with patch.object(ImageDraw.ImageDraw, 'text', paint):
+                        if operation == 'header':
+                            rendering.header(image, p, rendering.PALETTES[theme], .86)
+                        else:
+                            # The original footer also has a separator and colored dots.
+                            entries, legend_height = rendering.legend_layout(p, 1080, 1)
+                            start = 1350 - rendering.footer_height(p, 1080, 1) + 12
+                            marking.rectangle((50, start-2, 1030, start+2), fill=255)
+                            for x, dy, hall, lines in entries:
+                                marking.rectangle((51+x, start+19+dy, 67+x, start+36+dy), fill=255)
+                            rendering.footer(image, p, rendering.PALETTES[theme], 1, 1, 1)
+                    difference = ImageChops.difference(image, original).convert('L')
+                    outside = ImageChops.multiply(difference, ImageOps.invert(allowed))
+                    self.assertIsNone(outside.getbbox(), (operation, theme, color))
+
+    def test_render_extreme_opacities_preserves_hall_colors_and_background(self):
+        from PIL import ImageDraw
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'background.png'
+            for background in ('#FFFFFF', '#000000'):
+                Image.new('RGB', (40, 40), background).save(path)
+                for theme in ('Светлый', 'Тёмный'):
+                    for transparency in (0, 100):
+                        for panels in (0, 100):
+                            p = simple_project()
+                            p.style.update(palette=theme, bg_common=str(path), bg_transparency=transparency,
+                                           panel_transparency=panels, subtitle='Адрес студии', contact='Контакты')
+                            seen = []
+                            original = rendering.text_lines
+                            def text(draw, lines, x, y, face, fill, height, anchor='lt'):
+                                if getattr(draw, 'contrast_background', None) is not None:
+                                    for line in lines:
+                                        bounds = draw.textbbox((x, y), line, font=face, anchor=anchor)
+                                        ink, outline = rendering.adaptive_ink(draw.contrast_background, bounds, fill)
+                                        crop = draw.contrast_background.crop(bounds)
+                                        sample = crop.getpixel((crop.width//2, crop.height//2))
+                                        self.assertTrue(outline or rendering.contrast_ratio(rgb(ink), sample) >= 4.5)
+                                        seen.append(line)
+                                return original(draw, lines, x, y, face, fill, height, anchor)
+                            with patch.object(rendering, 'text_lines', side_effect=text):
+                                image = rendering.render(p, 'post')[0]
+                            self.assertIn('Адрес студии', seen)
+                            self.assertIn('Контакты', seen)
+                            expected = rendering.PALETTES[theme]['bg'] if transparency == 0 else background
+                            self.assertEqual(image.getpixel((10, 10)), rgb(expected))
 
     def test_time_badges_fit_their_bands_even_in_dense_landscape_export(self):
         from demo import demo_project

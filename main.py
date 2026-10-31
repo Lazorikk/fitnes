@@ -728,7 +728,7 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
 
     def update_status(self):
         studio = self.project.style.get('studio_name', 'Богини').strip() or 'Студия'
-        self.setWindowTitle(studio + ' — Студия расписаний 3.2[*]')
+        self.setWindowTitle(studio + ' — Студия расписаний 3.2.1[*]')
         self.brand_label.setText(studio.upper())
         dirty = self.project.to_dict() != self.saved
         self.state_label.setText('Сохраняем…' if dirty else 'Все изменения сохранены')
@@ -1319,7 +1319,7 @@ def main():
     app.setOrganizationName(APP_ORG)
     app.setApplicationName(APP_ID)
     app.setApplicationDisplayName('Студия расписаний')
-    app.setApplicationVersion('3.2.0')
+    app.setApplicationVersion('3.2.1')
     app.setStyle('Fusion')
     app.setPalette(light_palette())
     try:
