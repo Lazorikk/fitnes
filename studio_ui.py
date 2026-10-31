@@ -261,7 +261,10 @@ class StudioWorkflows:
             self.project.times = sorted([*self.project.times, new_time])
         self.project.set(day, new_time, hall, name)
         self.project.set_detail(day, new_time, hall, **detail)
-        self.changed(refresh=True)
+        # Finish the native focus/keyboard event before rebuilding the editor.
+        self.changed()
+        self.move_target = (day, new_time)
+        self.editor_refresh.start(0)
 
     def update_conflicts(self):
         warnings = self.project.conflicts()

@@ -200,10 +200,66 @@ class InlineTests(unittest.TestCase):
             self.w.copy_next_month()
         self.assertTrue(confirm.called)
         self.assertEqual(self.w.project.to_dict(), before)
+    def test_empty_cards_hide_unused_fields_and_spin_text_has_room(self):
+        empty = (DAY, '19:00', self.h)
+        self.assertFalse(self.w.cell_panels[empty].isVisible())
+        for control in self.w.cell_details[empty]:
+            self.assertFalse(control.isVisible())
+        _, duration, start = self.w.cell_details[(DAY, '18:00', self.h)]
+        self.assertGreater(start.lineEdit().width(), 30)
+        self.assertGreater(duration.lineEdit().width(), 30)
+        self.assertEqual(start.text(), '18:00')
+        self.w.assign(*empty, 'Растяжка')
+        self.app.processEvents()
+        self.assertTrue(self.w.cell_panels[empty].isVisible())
+
+    def test_native_enter_commits_move_once_and_preserves_metadata(self):
+        from PySide6.QtTest import QTest
+        start = self.w.cell_details[(DAY, '18:00', self.h)][2]
+        start.setFocus()
+        self.app.processEvents()
+        start.setTime(QtCore.QTime(18, 30))
+        history_size = len(self.w.undo_history)
+        QTest.keyClick(start, QtCore.Qt.Key_Return)
+        self.app.processEvents()
+        self.assertEqual(len(self.w.undo_history), history_size + 1)
+        self.assertEqual(self.w.project.get(DAY, '18:30', self.h), 'Йога')
+        self.assertEqual(self.w.project.detail(DAY, '18:30', self.h), {'trainer': 'Анна', 'duration': 60})
+        self.w.undo()
+        self.assertEqual(self.w.project.get(DAY, '18:00', self.h), 'Йога')
+        self.assertFalse(self.w.project.get(DAY, '18:30', self.h))
+
+    def test_move_and_rebuild_never_show_parentless_editor_windows(self):
+        flashes = []
+        class Watch(QtCore.QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QtCore.QEvent.Show and isinstance(obj, Q.QWidget) and obj.isWindow() and obj is not self_window:
+                    flashes.append(type(obj).__name__)
+                return False
+        self_window = self.w
+        watch = Watch()
+        self.app.installEventFilter(watch)
+        try:
+            self.w.change_option('trainer', 0)
+            self.w.change_option('trainer', 1)
+            start = self.w.cell_details[(DAY, '18:00', self.h)][2]
+            start.setTime(QtCore.QTime(18, 30))
+            with patch.object(Q.QDialog, 'exec', side_effect=AssertionError('Unexpected modal window')):
+                start.editingFinished.emit()
+                self.assertTrue(self.w.editor_refresh.isActive())
+                self.app.processEvents()
+            self.assertEqual(flashes, [])
+            self.assertFalse(self.w.editor_refresh.isActive())
+            self.assertEqual(self.w.project.get(DAY, '18:30', self.h), 'Йога')
+            self.assertTrue(self.w.cell_panels[(DAY, '18:30', self.h)].isVisible())
+            self.assertEqual(self.w.table.currentRow(), self.w.project.times.index('18:30'))
+        finally:
+            self.app.removeEventFilter(watch)
+
 
 
 class BackgroundContrastTests(unittest.TestCase):
-    def test_header_and_footer_have_contrast_surfaces_over_any_photo(self):
+    def test_header_and_footer_have_feathered_readable_text_over_any_photo(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'background.png'
             for background in ('#FFFFFF', '#000000'):
@@ -212,17 +268,50 @@ class BackgroundContrastTests(unittest.TestCase):
                     p = simple_project()
                     p.style.update(palette=theme, bg_common=str(path), bg_transparency=100,
                                    panel_transparency=100, subtitle='Адрес студии', contact='Запись на занятия')
-                    image = rendering.render(p, 'post')[0]
-                    palette = rendering.PALETTES[theme]
-                    self.assertEqual(image.getpixel((100, 25)), rgb(palette['bg']))
-                    self.assertEqual(image.getpixel((100, image.height - 20)), rgb(palette['bg']))
-                    def luminance(color):
-                        channels = [v / 255 for v in rgb(color)]
-                        channels = [v / 12.92 if v <= .04045 else ((v + .055) / 1.055) ** 2.4 for v in channels]
-                        return sum(v * weight for v, weight in zip(channels, (.2126, .7152, .0722)))
-                    for key in ('text', 'muted', 'accent'):
-                        light, dark = sorted((luminance(palette[key]), luminance(palette['bg'])), reverse=True)
-                        self.assertGreaterEqual((light + .05) / (dark + .05), 4.5)
+                    protected, text = [], []
+                    original_veil = rendering.contrast_veil
+                    original_text = rendering.text_lines
+                    def veil(image, bounds, scale):
+                        original_veil(image, bounds, scale)
+                        protected.append(image.copy())
+                    def capture(draw, lines, x, y, face, fill, height, anchor='lt'):
+                        for index, line in enumerate(lines):
+                            if line in ('Расписание занятий', 'Адрес студии', 'Зелёный зал', 'Запись на занятия'):
+                                box = draw.textbbox((x, y + index * height), line, font=face, anchor=anchor)
+                                text.append((line, box, fill))
+                            self.assertNotIn('STUDIO PLANNER', line)
+                        return original_text(draw, lines, x, y, face, fill, height, anchor)
+                    with patch.object(rendering, 'contrast_veil', side_effect=veil), patch.object(rendering, 'text_lines', side_effect=capture):
+                        image = rendering.render(p, 'post')[0]
+                    self.assertEqual(len(protected), 2)
+                    self.assertEqual(protected[0].getpixel((image.width - 5, 40)), rgb(background))
+                    def luminance(channels):
+                        values = [v / 255 for v in channels]
+                        values = [v / 12.92 if v <= .04045 else ((v + .055) / 1.055) ** 2.4 for v in values]
+                        return sum(v * weight for v, weight in zip(values, (.2126, .7152, .0722)))
+                    self.assertEqual(len(text), 4)
+                    for line, (x0, y0, x1, y1), fill in text:
+                        backing = protected[1] if line in ('Зелёный зал', 'Запись на занятия') else protected[0]
+                        for x, y in ((x0, y0), ((x0 + x1) / 2, (y0 + y1) / 2), (x1 - 1, y1 - 1)):
+                            values = (luminance(rgb(fill)), luminance(backing.getpixel((round(x), round(y)))))
+                            light, dark = sorted(values, reverse=True)
+                            self.assertGreaterEqual((light + .05) / (dark + .05), 4.5, (line, theme, background))
+
+    def test_time_badges_fit_their_bands_even_in_dense_landscape_export(self):
+        from demo import demo_project
+        p = demo_project()
+        for variant in rendering.FORMATS:
+            boxes = []
+            original = rendering.centered_text
+            def capture(draw, lines, box, *args):
+                if len(lines) == 1 and lines[0] in p.times:
+                    boxes.append(box)
+                return original(draw, lines, box, *args)
+            with patch.object(rendering, 'centered_text', side_effect=capture):
+                rendering.render(p, variant)
+            self.assertEqual(len(boxes), len(p.times))
+            for previous, current in zip(boxes, boxes[1:]):
+                self.assertLess(previous[3], current[1])
 
     def test_export_keeps_title_trainer_duration_on_separate_lines_with_smaller_details(self):
         p = simple_project()

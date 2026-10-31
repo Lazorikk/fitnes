@@ -136,7 +136,7 @@ class SessionCombo(Q.QComboBox):
     """A multiline selector keeps training names readable in a compact week grid."""
     def __init__(self):
         super().__init__()
-        self.setMinimumHeight(54)
+        self.setMinimumHeight(40)
 
     def paintEvent(self, event):
         option = Q.QStyleOptionComboBox()
@@ -148,6 +148,40 @@ class SessionCombo(Q.QComboBox):
         rect = self.style().subControlRect(Q.QStyle.CC_ComboBox, option, Q.QStyle.SC_ComboBoxEditField, self)
         painter.setPen(self.palette().color(QtGui.QPalette.Text))
         painter.drawText(rect.adjusted(3, 1, -2, -1), QtCore.Qt.AlignVCenter | QtCore.Qt.TextWordWrap, text)
+        painter.setPen(QtGui.QColor('#A197AD'))
+        painter.drawText(self.rect().adjusted(0, 0, -5, 0), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, '⌄')
+
+
+class TimeHeader(Q.QHeaderView):
+    """Anchor the time to the top of its band instead of centering between halls."""
+    def __init__(self, parent):
+        super().__init__(QtCore.Qt.Vertical, parent)
+        self.setMinimumWidth(88)
+        self.setSectionsClickable(True)
+
+    def paintSection(self, painter, rect, index):
+        if not rect.isValid():
+            return
+        painter.save()
+        painter.fillRect(rect, QtGui.QColor('#ECE8F2'))
+        painter.setPen(QtGui.QColor('#D2CBDD'))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+        painter.setClipRect(rect)
+        text_rect = QtCore.QRect(rect)
+        text_rect.moveTop(min(max(rect.top(), 0), rect.bottom() - 58))
+        small = QtGui.QFont(self.font())
+        small.setPixelSize(9)
+        painter.setFont(small)
+        painter.setPen(QtGui.QColor('#766D86'))
+        painter.drawText(text_rect.adjusted(6, 12, -6, 0), QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter, 'НАЧАЛО')
+        face = QtGui.QFont(self.font())
+        face.setPixelSize(17)
+        face.setBold(True)
+        painter.setFont(face)
+        painter.setPen(QtGui.QColor('#493D60'))
+        value = str(self.model().headerData(index, QtCore.Qt.Vertical) or '')
+        painter.drawText(text_rect.adjusted(6, 30, -6, 0), QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter, value)
+        painter.restore()
 
 
 class RenderJob(QtCore.QThread):
@@ -200,6 +234,10 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
         self.preview_timer.setSingleShot(True)
         self.preview_timer.setInterval(1100)
         self.preview_timer.timeout.connect(self.refresh_preview)
+        self.editor_refresh = QtCore.QTimer(self)
+        self.editor_refresh.setSingleShot(True)
+        self.editor_refresh.timeout.connect(self.finish_inline_move)
+        self.move_target = None
         self.setup_ui()
         self.setup_menu()
         self.refresh_all()
@@ -295,6 +333,7 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
         layout.setContentsMargins(0, 18, 12, 0)
         row = Q.QHBoxLayout()
         self.schedule_heading = label('Расписание', 'section')
+        self.schedule_heading.setWordWrap(False)
         row.addWidget(self.schedule_heading)
         row.addStretch()
         self.count_label = label('', 'muted')
@@ -334,7 +373,8 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
         self.table.setSelectionMode(Q.QAbstractItemView.SingleSelection)
         self.table.setSelectionBehavior(Q.QAbstractItemView.SelectRows)
         self.table.setEditTriggers(Q.QAbstractItemView.NoEditTriggers)
-        self.table.verticalHeader().setMinimumWidth(70)
+        self.table.setVerticalHeader(TimeHeader(self.table))
+        self.table.setShowGrid(False)
         layout.addWidget(self.table, 1)
         self.conflict_label = label('', 'conflicts')
         layout.addWidget(self.conflict_label)
@@ -688,7 +728,7 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
 
     def update_status(self):
         studio = self.project.style.get('studio_name', 'Богини').strip() or 'Студия'
-        self.setWindowTitle(studio + ' — студия расписаний[*]')
+        self.setWindowTitle(studio + ' — Студия расписаний 3.2[*]')
         self.brand_label.setText(studio.upper())
         dirty = self.project.to_dict() != self.saved
         self.state_label.setText('Сохраняем…' if dirty else 'Все изменения сохранены')
@@ -699,6 +739,8 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
         self.redo_btn.setEnabled(bool(self.redo_history))
 
     def refresh_all(self):
+        self.editor_refresh.stop()
+        self.move_target = None
         self.loading = True
         try:
             for day, checkbox in self.day_checks.items():
@@ -728,20 +770,33 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
         self.table.setVerticalHeaderLabels(self.project.times)
         self.table.horizontalHeader().setMinimumSectionSize(145)
         self.table.horizontalHeader().setSectionResizeMode(Q.QHeaderView.Stretch)
-        self.table.verticalHeader().setDefaultSectionSize(14 + len(self.project.halls) * (100 + (36 if self.project.options['trainer'] else 0)))
+        self.table.verticalHeader().setDefaultSectionSize(160)
         self.cell_combos = {}
         self.cell_details = {}
+        self.cell_panels = {}
         for column, day in enumerate(self.project.days):
             self.table.setColumnWidth(column, 200)
             for row, time in enumerate(self.project.times):
                 cell = Q.QWidget()
                 cell.setObjectName('scheduleCell')
+                background = '#F7F8FC' if row % 2 == 0 else '#EFF2F8'
+                cell.setStyleSheet(f'QWidget#scheduleCell {{ background: {background}; border-bottom: 3px solid #D5D9E5; }}')
                 layout = Q.QVBoxLayout(cell)
-                layout.setContentsMargins(7, 7, 7, 7)
+                layout.setContentsMargins(6, 9, 6, 12)
                 layout.setSpacing(6)
                 for hall_info in self.project.halls:
                     hall = hall_info['id']
+                    card = Q.QFrame(cell)
+                    card.setObjectName('sessionCard')
+                    card.setStyleSheet(f'QFrame#sessionCard {{ background: #FFFFFF; border: 1px solid #E1E3EB; border-left: 3px solid {hall_info["color"]}; border-radius: 9px; }}')
+                    card_layout = Q.QVBoxLayout(card)
+                    card_layout.setContentsMargins(9, 7, 9, 8)
+                    card_layout.setSpacing(4)
+                    hall_label = label(hall_info['name'])
+                    hall_label.setStyleSheet('color: #756B84; font-size: 10px; font-weight: 600; background: transparent;')
+                    card_layout.addWidget(hall_label)
                     combo = SessionCombo()
+                    combo.setParent(card)
                     combo.setSizePolicy(Q.QSizePolicy.Ignored, Q.QSizePolicy.Fixed)
                     combo.setMinimumContentsLength(8)
                     combo.addItem('＋ Занятие', '')
@@ -751,8 +806,8 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
                     combo.setCurrentIndex(max(0, combo.findData(self.project.get(day, time, hall))))
                     combo.setToolTip(hall_info['name'] + ' · ' + day + ' · ' + time + '\n'
                                      + (self.project.session_text(day, time, hall) or 'Нет занятия'))
-                    color, border = tint(hall_info['color']), hall_info['color']
-                    combo.setStyleSheet(f'QComboBox {{ background: {color}; color: #292C3E; border: 1px solid {border}; padding: 7px; font-size: 12px; }} QComboBox QAbstractItemView {{ background: #FFFFFF; color: #292C3E; selection-background-color: #E7DFF2; selection-color: #292C3E; }}')
+                    color, border = '#FFFFFF', '#FFFFFF'
+                    combo.setStyleSheet(f'QComboBox {{ background: {color}; color: #292C3E; border: 1px solid {border}; padding: 3px; font-size: 12px; font-weight: 600; }} QComboBox QAbstractItemView {{ background: #FFFFFF; color: #292C3E; selection-background-color: #E7DFF2; selection-color: #292C3E; }} QComboBox::drop-down {{ border: none; width: 16px; }}')
                     combo.currentIndexChanged.connect(
                         lambda _, d=day, t=time, h=hall, w=combo: self.assign(d, t, h, w.currentData()))
                     line = Q.QHBoxLayout()
@@ -764,52 +819,95 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
                     edit.setToolTip('Изменить время, сведения или отменить занятие')
                     edit.clicked.connect(lambda checked=False, d=day, t=time, h=hall: self.edit_session(d, t, h))
                     line.addWidget(edit)
-                    layout.addLayout(line)
+                    card_layout.addLayout(line)
                     self.cell_combos[(day, time, hall)] = combo
-                    self.add_inline_fields(layout, day, time, hall)
+                    self.add_inline_fields(card_layout, day, time, hall)
+                    layout.addWidget(card)
+                layout.addStretch()
                 self.table.setCellWidget(row, column, cell)
         if not self.project.trainings:
             self.statusBar().showMessage('Начните с вкладки «Тренировки» или загрузите пример в меню «Проект».')
+        self.resize_time_bands()
         self.filter_rows()
 
     def add_inline_fields(self, layout, day, time, hall):
+        panel = Q.QWidget(layout.parentWidget())
+        panel.setObjectName('sessionDetails')
+        panel.setStyleSheet('QWidget#sessionDetails { background: transparent; } QLineEdit, QTimeEdit, QSpinBox { padding: 5px; border: 1px solid #E3E5ED; border-radius: 6px; font-size: 11px; background: #FAFAFD; } QLabel { color: #81778D; font-size: 9px; background: transparent; } QTimeEdit::up-button, QTimeEdit::down-button, QSpinBox::up-button, QSpinBox::down-button { width: 0px; height: 0px; border: none; }')
+        fields = Q.QVBoxLayout(panel)
+        fields.setContentsMargins(0, 0, 0, 0)
+        fields.setSpacing(5)
         detail = self.project.detail(day, time, hall)
-        trainer = Q.QLineEdit(detail.get('trainer', ''))
+        trainer = Q.QLineEdit(detail.get('trainer', ''), panel)
         trainer.setMaxLength(80)
-        trainer.setPlaceholderText('Имя тренера')
-        trainer.setToolTip('Виден только вам' if self.project.options['trainer'] == 1 else 'Отдельная строка под названием на картинке')
+        trainer.setMinimumHeight(28)
+        trainer.setPlaceholderText('Тренер · имя')
+        trainer.setToolTip('Только для вас' if self.project.options['trainer'] == 1 else 'Тренер · отдельная строка на картинке')
+        fields.addWidget(trainer)
         trainer.setVisible(bool(self.project.options['trainer']))
-        if self.project.options['trainer']:
-            layout.addWidget(trainer)
-        else:
-            trainer.setParent(layout.parentWidget())
-            trainer.hide()
         row = Q.QHBoxLayout()
-        row.setSpacing(3)
-        start = Q.QTimeEdit(QtCore.QTime.fromString(time, 'HH:mm'))
+        row.setSpacing(5)
+        start_column = Q.QVBoxLayout()
+        start_column.setSpacing(2)
+        start_column.addWidget(Q.QLabel('Начало', panel))
+        start = Q.QTimeEdit(QtCore.QTime.fromString(time, 'HH:mm'), panel)
         start.setDisplayFormat('HH:mm')
-        start.setToolTip('Время начала · можно изменить здесь')
-        start.setMinimumWidth(62)
-        row.addWidget(start)
-        duration = Q.QSpinBox()
+        start.setKeyboardTracking(False)
+        start.setMinimumWidth(48)
+        start.setMinimumHeight(28)
+        start.setToolTip('Время начала · Enter или выход из поля применяет перенос')
+        start_column.addWidget(start)
+        row.addLayout(start_column, 1)
+        duration_column = Q.QVBoxLayout()
+        duration_column.setSpacing(2)
+        duration_label = Q.QLabel('Длительность', panel)
+        duration = Q.QSpinBox(panel)
         duration.setRange(0, 720)
-        duration.setSpecialValueText('— мин')
+        duration.setKeyboardTracking(False)
+        duration.setSpecialValueText('—')
         duration.setSuffix(' мин')
         duration.setValue(detail.get('duration', 0))
-        duration.setToolTip('Длительность · только для себя' if self.project.options['duration'] == 1 else 'Длительность · отдельная строка на картинке')
-        if self.project.options['duration']:
-            row.addWidget(duration)
-        else:
-            duration.setParent(layout.parentWidget())
-            duration.hide()
-        layout.addLayout(row)
+        duration.setMinimumWidth(48)
+        duration.setMinimumHeight(28)
+        for control in (start, duration):
+            control.lineEdit().setStyleSheet('border: none; background: transparent; padding: 0px;')
+            control.lineEdit().setTextMargins(5, 0, 2, 0)
+        duration.setToolTip('Длительность · только для вас' if self.project.options['duration'] == 1 else 'Длительность · отдельная строка на картинке')
+        duration_column.addWidget(duration_label)
+        duration_column.addWidget(duration)
+        row.addLayout(duration_column, 1)
+        duration_label.setVisible(bool(self.project.options['duration']))
+        duration.setVisible(bool(self.project.options['duration']))
+        fields.addLayout(row)
+        layout.addWidget(panel)
         enabled = bool(self.project.get(day, time, hall))
+        panel.setVisible(enabled)
         for widget in (trainer, start, duration):
             widget.setEnabled(enabled)
         trainer.editingFinished.connect(lambda: self.save_inline_detail(day, time, hall, trainer.text(), duration.value()))
         duration.editingFinished.connect(lambda: self.save_inline_detail(day, time, hall, trainer.text(), duration.value()))
         start.editingFinished.connect(lambda: self.move_inline_session(day, time, hall, start.time().toString('HH:mm')))
         self.cell_details[(day, time, hall)] = (trainer, duration, start)
+        self.cell_panels[(day, time, hall)] = panel
+
+    def resize_time_bands(self):
+        for row, time in enumerate(self.project.times):
+            height = 20
+            for hall in self.project.hall_ids:
+                occupied = any(self.project.get(day, time, hall) for day in self.project.days)
+                height += (164 if self.project.options['trainer'] else 132) if occupied else 76
+            self.table.setRowHeight(row, height)
+
+    def finish_inline_move(self):
+        target = self.move_target
+        self.move_target = None
+        self.refresh_all()
+        if target:
+            day, time = target
+            if day in self.project.days and time in self.project.times:
+                index = self.table.model().index(self.project.times.index(time), self.project.days.index(day))
+                self.table.setCurrentIndex(index)
+                self.table.scrollTo(index, Q.QAbstractItemView.PositionAtCenter)
 
     def filter_rows(self):
         for row, time in enumerate(self.project.times):
@@ -836,6 +934,8 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
         trainer, duration, start = self.cell_details[(day, time, hall)]
         trainer.setText('')
         duration.setValue(0)
+        self.cell_panels[(day, time, hall)].setVisible(bool(name))
+        self.resize_time_bands()
         self.changed()
 
     def change_style(self, key, value, refresh=False):
@@ -1197,6 +1297,7 @@ class MainWindow(StudioWorkflows, Q.QMainWindow):
                 return
         self.autosave.stop()
         self.preview_timer.stop()
+        self.editor_refresh.stop()
         event.accept()
 
 
@@ -1218,7 +1319,7 @@ def main():
     app.setOrganizationName(APP_ORG)
     app.setApplicationName(APP_ID)
     app.setApplicationDisplayName('Студия расписаний')
-    app.setApplicationVersion('3.1.0')
+    app.setApplicationVersion('3.2.0')
     app.setStyle('Fusion')
     app.setPalette(light_palette())
     try:

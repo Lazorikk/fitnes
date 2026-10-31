@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
 from colors import text_color, rgb
 
 FORMATS = {'story': ('Сторис · 1080 × 1920', (1080, 1920)),
@@ -132,14 +132,33 @@ def canvas(project, variant, size):
     return image, palette
 
 
+PHOTO_INK = {'text': '#292435', 'muted': '#595165', 'accent': '#715587',
+             'card': '#FFFFFF', 'day': '#EEE7F4', 'day_text': '#57416D'}
+
+
+def contrast_veil(image, bounds, scale):
+    """Feather a local ivory veil behind text, with no visible rectangular edge."""
+    x0, y0, x1, y1 = bounds
+    pad = max(12, round(28 * scale))
+    mask = Image.new('L', image.size)
+    ImageDraw.Draw(mask).rounded_rectangle((x0 - pad, y0 - pad, x1 + pad, y1 + pad),
+                                           radius=pad, fill=252)
+    mask = mask.filter(ImageFilter.GaussianBlur(max(5, round(10 * scale))))
+    veil = Image.new('RGB', image.size, '#FCFAF7')
+    image.paste(veil, (0, 0), mask)
+
+
 def header(image, project, palette, scale):
     surface = Image.new('RGBA', image.size)
     draw = ImageDraw.Draw(surface)
+    if has_background(project):
+        palette = {**palette, **PHOTO_INK}
     width, _ = image.size
     margin = round(42 * scale)
     start_y = round(40 * scale)
     text_x = margin
     logo = None
+    logo_bottom = 0
     logo_size = round(184 * scale)
     if project.style.get('logo_path'):
         logo = open_asset(project.style['logo_path'])
@@ -152,14 +171,15 @@ def header(image, project, palette, scale):
     text_width = width - margin - text_x
     studio = project.style.get('studio_name', 'Богини').strip() or 'Студия'
     brand_face = font(16 * scale, bold=True)
-    brand_lines = wrap(draw, studio.upper() + ' / STUDIO PLANNER', brand_face, text_width)
+    title = project.style.get('title') or 'Расписание занятий'
+    brand_lines = wrap(draw, studio.upper(), brand_face, text_width) if studio.casefold() != title.strip().casefold() else []
     y = text_lines(draw, brand_lines, text_x, start_y, brand_face,
                    palette['accent'], round(22 * scale))
-    y += round(23 * scale)
+    y += round(12 * scale) if brand_lines else 0
     title = project.style.get('title') or 'Расписание занятий'
-    face = font(62 * scale, bold=True)
+    face = font(48 * scale, bold=True)
     lines = wrap(draw, title, face, text_width)
-    y = text_lines(draw, lines, text_x, y, face, palette['text'], round(73 * scale))
+    y = text_lines(draw, lines, text_x, y, face, palette['text'], round(58 * scale))
     if project.style.get('subtitle'):
         y += round(12 * scale)
         face = font(21 * scale)
@@ -168,13 +188,14 @@ def header(image, project, palette, scale):
     if logo is not None:
         logo_y = round(max(start_y, (start_y + y - logo_size) / 2))
         tile = (margin, logo_y, margin + logo_size, logo_y + logo_size)
-        draw.rounded_rectangle(tile, radius=round(22 * scale), fill=palette['card'])
+        if not has_background(project):
+            draw.rounded_rectangle(tile, radius=round(22 * scale), fill=palette['card'])
         inset = round(12 * scale)
         logo = ImageOps.contain(logo, (logo_size - 2 * inset, logo_size - 2 * inset),
                                 Image.Resampling.LANCZOS)
         surface.alpha_composite(logo, (round(margin + (logo_size - logo.width) / 2),
                                        round(logo_y + (logo_size - logo.height) / 2)))
-        y = max(y, logo_y + logo_size)
+        logo_bottom = logo_y + logo_size
     if project.period_text():
         y += round(20 * scale)
         face = font(19 * scale, bold=True)
@@ -186,14 +207,11 @@ def header(image, project, palette, scale):
         text_lines(draw, lines, text_x + 16 * scale, y + 10 * scale,
                    face, palette['day_text'], round(26 * scale))
         y += badge_height
-    bottom = y + round(32 * scale)
+    bottom = max(y, logo_bottom) + round(32 * scale)
     if has_background(project):
-        # A solid local surface guarantees contrast, even over a bright photograph
-        # with 100% background visibility. The rest of the background is untouched.
-        ImageDraw.Draw(image).rounded_rectangle(
-            (max(0, margin - 18 * scale), max(0, start_y - 18 * scale),
-             width - max(0, margin - 18 * scale), bottom - 12 * scale),
-            radius=18 * scale, fill=palette['bg'])
+        bounds = surface.getbbox()
+        if bounds:
+            contrast_veil(image, bounds, scale)
     image.paste(surface, (0, 0), surface)
     return bottom
 
@@ -229,15 +247,16 @@ def footer_height(project, width, scale):
 
 
 def footer(image, project, palette, page, total, scale):
-    draw = ImageDraw.Draw(image)
+    surface = Image.new('RGBA', image.size)
+    draw = ImageDraw.Draw(surface)
+    photo = has_background(project)
+    if photo:
+        palette = {**palette, **PHOTO_INK}
     w, h = image.size
     margin = round(52 * scale)
     y = h - footer_height(project, w, scale) + round(12 * scale)
-    if has_background(project):
-        draw.rounded_rectangle((margin - 18 * scale, y - 12 * scale,
-                                w - margin + 18 * scale, h - 8 * scale),
-                               radius=18 * scale, fill=palette['bg'])
-    draw.line((margin, y, w - margin, y), fill=palette['line'], width=max(1, round(scale)))
+    if not photo:
+        draw.line((margin, y, w - margin, y), fill=palette['line'], width=max(1, round(scale)))
     y += round(20 * scale)
     entries, legend_height = legend_layout(project, w, scale)
     for x, dy, hall, lines in entries:
@@ -248,6 +267,9 @@ def footer(image, project, palette, page, total, scale):
         face = font(19 * scale)
         text_lines(draw, wrap(draw, project.style['contact'], face, w - 2 * margin),
                    margin, y + legend_height + 14 * scale, face, palette['muted'], round(27 * scale))
+    if photo and surface.getbbox():
+        contrast_veil(image, surface.getbbox(), scale)
+    image.paste(surface, (0, 0), surface)
 
 
 def cell_blocks(values, x, y, width, height, gap):
@@ -326,6 +348,8 @@ def weekly_grid(project, variant):
     landscape = size[0] > size[1]
     scale = size[0] / 1080
     image, palette = canvas(project, variant, size)
+    if has_background(project):
+        palette = {**palette, 'card': '#FFFFFF', 'shadow': '#B6ABBF', 'line': '#B4A6C2'}
     draw = ImageDraw.Draw(image)
     top = header(image, project, palette, scale * (.52 if landscape else .86))
     footer_scale = scale * .55 if landscape else scale
@@ -364,11 +388,21 @@ def weekly_grid(project, variant):
     time_face = font(round(18 * scale), bold=True)
     for row in layout['rows']:
         y, height = row['y'], row['height']
-        ty = y + (height - round(34 * scale)) / 2
-        draw.rounded_rectangle((margin, ty, margin + time_width - gap, ty + 34 * scale),
-                               radius=round(9 * scale), fill=palette['time'])
-        centered_text(draw, [row['time']], (margin, ty, margin + time_width - gap, ty + 34 * scale),
-                      time_face, palette['muted'], round(time_face.size * 1.24))
+        # The time is anchored to the start of its band; a rule separates bands
+        # even when two halls share the same start time.
+        rule_layer = Image.new('RGBA', size)
+        rule_draw = ImageDraw.Draw(rule_layer)
+        rule_color = (105, 91, 127, 80) if has_background(project) else (*rgb(palette['muted']), 55)
+        rule_draw.line((margin, y, size[0] - margin, y), fill=rule_color, width=max(1, round(scale)))
+        image.paste(rule_layer, (0, 0), rule_layer)
+        draw = ImageDraw.Draw(image)
+        ty = y + gap / 2 + 2 * scale
+        badge_height = min(34 * scale, height - gap - 4 * scale)
+        row_time_face = font(min(time_face.size, badge_height * .6), bold=True)
+        draw.rounded_rectangle((margin, ty, margin + time_width - gap, ty + badge_height),
+                               radius=round(7 * scale), fill=('#F5F0F8' if has_background(project) else palette['time']))
+        centered_text(draw, [row['time']], (margin, ty, margin + time_width - gap, ty + badge_height),
+                      row_time_face, (PHOTO_INK['text'] if has_background(project) else palette['muted']), round(row_time_face.size * 1.24))
         for column, values in enumerate(row['cells']):
             x = margin + time_width + column * column_width
             blocks = cell_blocks(values, x + padding, y, column_width - padding * 2, height, gap)
