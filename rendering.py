@@ -150,10 +150,10 @@ def header(image, project, palette, scale):
         image.paste(logo, (round(margin + (logo_size - logo.width) / 2),
                            round(logo_y + (logo_size - logo.height) / 2)), logo)
         y = max(y, logo_y + logo_size)
-    if project.style.get('period'):
+    if project.period_text():
         y += round(20 * scale)
         face = font(19 * scale, bold=True)
-        lines = wrap(draw, project.style['period'], face, text_width - 32 * scale)
+        lines = wrap(draw, project.period_text(), face, text_width - 32 * scale)
         badge_width = max(draw.textlength(line, font=face) for line in lines) + 32 * scale
         badge_height = len(lines) * 26 * scale + 18 * scale
         draw.rounded_rectangle((text_x, y, text_x + badge_width, y + badge_height),
@@ -245,7 +245,7 @@ def grid_layout(project, variant, draw, top, bottom):
             for day in project.days:
                 values = []
                 for hall in project.hall_ids:
-                    name = project.get(day, time, hall)
+                    name = project.session_text(day, time, hall)
                     if size > minimum_font and any(
                             draw.textlength(word, font=face) > column_width - padding * 4
                             for word in name.split() if len(word) <= 18):
@@ -296,7 +296,7 @@ def weekly_grid(project, variant):
     radius = round(14 * scale)
     # Independent day panels preserve the weekly grid without spreadsheet borders.
     day_face = font(round(14 * scale), bold=True)
-    while any(draw.textlength(day, font=day_face) > column_width - padding * 2 for day in project.days):
+    while any(draw.textlength(project.day_title(day), font=day_face) > column_width - padding * 2 for day in project.days):
         day_face = font(day_face.size - 1, bold=True)
     panel_layer = Image.new('RGBA', size, (0, 0, 0, 0))
     panel_draw = ImageDraw.Draw(panel_layer)
@@ -316,7 +316,7 @@ def weekly_grid(project, variant):
         panel_left, panel_right = x + gap / 2, x + column_width - gap / 2
         draw.rounded_rectangle((panel_left, top, panel_right, table_top - gap),
                                radius=radius, fill=palette['day'])
-        centered_text(draw, [day], (panel_left, top, panel_right, table_top - gap),
+        centered_text(draw, [project.day_title(day)], (panel_left, top, panel_right, table_top - gap),
                       day_face, palette['day_text'], round(day_face.size * 1.24))
     face, line_height = layout['font'], layout['line_height']
     time_face = font(round(18 * scale), bold=True)

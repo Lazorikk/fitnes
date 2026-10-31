@@ -8,6 +8,7 @@ import re
 import sys
 import tempfile
 import uuid
+from datetime import date, timedelta
 
 from colors import valid_color
 from dataclasses import dataclass, field
@@ -87,6 +88,114 @@ class Project:
     formats: list[dict] = field(default_factory=lambda: copy.deepcopy(DEFAULT_FORMATS))
     enabled_formats: list[str] = field(default_factory=lambda: [f['id'] for f in DEFAULT_FORMATS])
 
+    # The active schedule remains compatible with the original editor and renderer.
+    active_week: str = ''
+    template: dict = field(default_factory=dict)
+    weeks: dict = field(default_factory=dict)
+    details: dict = field(default_factory=dict)
+    options: dict = field(default_factory=lambda: {'trainer': 0, 'duration': 0})
+
+    def week_state(self):
+        return copy.deepcopy({key: getattr(self, key) for key in ('schedule', 'details', 'times', 'days')})
+
+    @staticmethod
+    def monday(value):
+        day = date.fromisoformat(value) if isinstance(value, str) else value
+        return (day - timedelta(days=day.weekday())).isoformat()
+
+    def switch_week(self, key):
+        key = self.monday(key) if key else ''
+        if key == self.active_week:
+            return
+        if self.active_week:
+            self.weeks[self.active_week] = self.week_state()
+        else:
+            self.template = self.week_state()
+        state = self.weeks.get(key, self.template) if key else self.template
+        for name, value in state.items():
+            setattr(self, name, copy.deepcopy(value))
+        self.active_week = key
+
+    def replace_week(self, previous=False):
+        if not self.active_week:
+            raise ValueError('Сначала выберите неделю по дате.')
+        key = (date.fromisoformat(self.active_week) - timedelta(days=7)).isoformat()
+        if previous and key not in self.weeks:
+            raise ValueError('Предыдущая неделя ещё не сохранена. Откройте её или используйте шаблон.')
+        state = self.weeks[key] if previous else self.template
+        for name, value in state.items():
+            setattr(self, name, copy.deepcopy(value))
+
+    def detail(self, day, time, hall):
+        return self.details.get(day, {}).get(time, {}).get(hall, {})
+
+    def set_detail(self, day, time, hall, trainer='', duration=0):
+        if not isinstance(trainer, str) or len(trainer) > 80 or type(duration) is not int or not 0 <= duration <= 720:
+            raise ValueError('Тренер: до 80 символов. Длительность: до 720 минут.')
+        self.details.setdefault(day, {}).setdefault(time, {})[hall] = {'trainer': trainer.strip(), 'duration': duration}
+
+    def session_text(self, day, time, hall):
+        name = self.get(day, time, hall)
+        if not name:
+            return ''
+        detail = self.detail(day, time, hall)
+        extra = []
+        if self.options['trainer'] == 2 and detail.get('trainer'):
+            extra.append(detail['trainer'])
+        if self.options['duration'] == 2 and detail.get('duration'):
+            extra.append(str(detail['duration']) + ' мин')
+        return name + (' · ' + ' · '.join(extra) if extra else '')
+
+    def period_text(self):
+        if not self.active_week:
+            return self.style.get('period', '')
+        start = date.fromisoformat(self.active_week)
+        return f'{start:%d.%m.%Y} — {start + timedelta(days=6):%d.%m.%Y}'
+
+    def day_title(self, day):
+        if not self.active_week:
+            return day
+        value = date.fromisoformat(self.active_week) + timedelta(days=ALL_DAYS.index(day))
+        return f'{day} {value:%d.%m}'
+
+    def publication_text(self):
+        lines = [self.style.get('studio_name', '').strip() or 'Наша студия',
+                 'Расписание занятий' + (' · ' + self.period_text() if self.period_text() else '')]
+        for day in self.days:
+            sessions = []
+            for time in self.times:
+                for hall in self.hall_ids:
+                    text = self.session_text(day, time, hall)
+                    if text:
+                        suffix = ' · ' + self.hall(hall)['name'] if len(self.halls) > 1 else ''
+                        sessions.append(f'{time} — {text}{suffix}')
+            if sessions:
+                lines.extend(['', self.day_title(day), *sessions])
+        if self.style.get('contact', '').strip():
+            lines.extend(['', self.style['contact'].strip()])
+        return '\n'.join(lines)
+
+    def conflicts(self):
+        warnings = []
+        for day in self.days:
+            sessions = [(t, h, self.get(day, t, h), self.detail(day, t, h))
+                        for t in self.times for h in self.hall_ids if self.get(day, t, h)]
+            for index, (time, hall, name, detail) in enumerate(sessions):
+                start = int(time[:2]) * 60 + int(time[3:])
+                for other_time, other_hall, other_name, other in sessions[index + 1:]:
+                    other_start = int(other_time[:2]) * 60 + int(other_time[3:])
+                    same_trainer = (self.options['trainer'] > 0 and detail.get('trainer', '').strip()
+                                    and detail['trainer'].casefold() == other.get('trainer', '').casefold())
+                    duration = detail.get('duration', 0) if self.options['duration'] else 0
+                    other_duration = other.get('duration', 0) if self.options['duration'] else 0
+                    overlap = (start == other_start or
+                               (start < other_start + max(other_duration, 1)
+                                and other_start < start + max(duration, 1)))
+                    if overlap and (hall == other_hall or same_trainer):
+                        reason = self.hall(hall)['name'] if hall == other_hall else 'тренер ' + detail['trainer']
+                        warnings.append(f'{day}: {time} «{name}» и {other_time} «{other_name}» — {reason}.')
+        return warnings
+
     @property
     def hall_ids(self):
         return [hall['id'] for hall in self.halls]
@@ -121,7 +230,17 @@ class Project:
         if len(self.halls) == 1:
             raise ValueError('Нужен хотя бы один зал.')
         self.halls = [hall for hall in self.halls if hall['id'] != identity]
+        for state in [self.week_state(), self.template, *self.weeks.values()]:
+            for slots in state.get('schedule', {}).values():
+                for halls in slots.values():
+                    halls.pop(identity, None)
+            for slots in state.get('details', {}).values():
+                for halls in slots.values():
+                    halls.pop(identity, None)
         for slots in self.schedule.values():
+            for halls in slots.values():
+                halls.pop(identity, None)
+        for slots in self.details.values():
             for halls in slots.values():
                 halls.pop(identity, None)
 
@@ -137,14 +256,16 @@ class Project:
         return identity
 
     def to_dict(self):
-        return copy.deepcopy({'version': 3, 'trainings': self.trainings, 'days': self.days,
+        return copy.deepcopy({'version': 4, 'trainings': self.trainings, 'days': self.days,
                               'times': self.times, 'schedule': self.schedule, 'style': self.style,
-                              'halls': self.halls, 'formats': self.formats, 'enabled_formats': self.enabled_formats})
+                              'halls': self.halls, 'formats': self.formats, 'enabled_formats': self.enabled_formats,
+                              'active_week': self.active_week, 'template': self.template,
+                              'weeks': self.weeks, 'details': self.details, 'options': self.options})
 
     @classmethod
     def from_dict(cls, data):
-        if not isinstance(data, dict) or data.get('version') not in (2, 3):
-            raise ValueError('Поддерживаются проекты студии расписаний версий 2 и 3.')
+        if not isinstance(data, dict) or data.get('version') not in (2, 3, 4):
+            raise ValueError('Поддерживаются проекты студии расписаний версий 2–4.')
         for key in ('trainings', 'days', 'times'):
             if not isinstance(data.get(key), list) or not all(isinstance(x, str) for x in data[key]):
                 raise ValueError(f'Некорректное поле проекта: {key}.')
@@ -207,12 +328,55 @@ class Project:
                 project.style[key] = value if isinstance(value, str) else default
         if project.style['palette'] not in ('Светлый', 'Тёмный'):
             project.style['palette'] = 'Светлый'
+        options = data.get('options', {'trainer': 0, 'duration': 0})
+        if not isinstance(options, dict) or any(type(options.get(k)) is not int or options[k] not in (0, 1, 2) for k in ('trainer', 'duration')):
+            raise ValueError('Некорректные настройки дополнительных полей.')
+        project.options = dict(options)
+        details = data.get('details', {})
+        if not isinstance(details, dict):
+            raise ValueError('Некорректные сведения о занятиях.')
+        for day, slots in details.items():
+            if day not in ALL_DAYS or not isinstance(slots, dict):
+                raise ValueError('Некорректные сведения о дне.')
+            for time, halls in slots.items():
+                if not valid_time(time) or not isinstance(halls, dict):
+                    raise ValueError('Некорректные сведения о времени.')
+                for hall, detail in halls.items():
+                    if hall not in project.hall_ids or not isinstance(detail, dict):
+                        raise ValueError('Некорректные сведения о зале.')
+                    project.set_detail(day, time, hall, detail.get('trainer', ''), detail.get('duration', 0))
+        key = data.get('active_week', '')
+        if not isinstance(key, str) or (key and cls.monday(key) != key):
+            raise ValueError('Неделя должна начинаться с понедельника.')
+        project.active_week = key
+        weeks, template = data.get('weeks', {}), data.get('template', {})
+        if not isinstance(weeks, dict) or not isinstance(template, dict) or (key and not template):
+            raise ValueError('Некорректный архив недель.')
+        def normalize(state):
+            if not isinstance(state, dict) or any(k not in state for k in ('schedule', 'times', 'days', 'details')):
+                raise ValueError('Некорректное расписание недели.')
+            base = project.to_dict()
+            for k in ('weeks', 'template', 'active_week'):
+                base.pop(k, None)
+            base.update({k: state[k] for k in ('schedule', 'times', 'days', 'details')})
+            restored = cls.from_dict(base)
+            for name in restored.trainings:
+                if name not in project.trainings:
+                    project.trainings.append(name)
+            return restored.week_state()
+        project.template = normalize(template) if template else {}
+        for week, state in weeks.items():
+            if not isinstance(week, str) or cls.monday(week) != week:
+                raise ValueError('Некорректная дата в архиве.')
+            project.weeks[week] = normalize(state)
         return project
 
     def get(self, day, time, hall):
         return self.schedule.get(day, {}).get(time, {}).get(hall) or ''
 
     def set(self, day, time, hall, name):
+        if self.get(day, time, hall) != (name or ''):
+            self.details.get(day, {}).get(time, {}).pop(hall, None)
         self.schedule.setdefault(day, {}).setdefault(time, {})[hall] = name or None
 
     def count(self):
@@ -222,19 +386,21 @@ class Project:
         if new in self.trainings and old != new:
             raise ValueError('Такая тренировка уже есть.')
         self.trainings = [new if name == old else name for name in self.trainings]
-        for slots in self.schedule.values():
-            for halls in slots.values():
-                for hall in self.hall_ids:
-                    if halls.get(hall) == old:
-                        halls[hall] = new
+        for schedule in [self.schedule, self.template.get('schedule', {}), *[s['schedule'] for s in self.weeks.values()]]:
+            for slots in schedule.values():
+                for halls in slots.values():
+                    for hall in self.hall_ids:
+                        if halls.get(hall) == old:
+                            halls[hall] = new
 
     def remove_training(self, name):
         self.trainings.remove(name)
-        for slots in self.schedule.values():
-            for halls in slots.values():
-                for hall in self.hall_ids:
-                    if halls.get(hall) == name:
-                        halls[hall] = None
+        for schedule in [self.schedule, self.template.get('schedule', {}), *[s['schedule'] for s in self.weeks.values()]]:
+            for slots in schedule.values():
+                for halls in slots.values():
+                    for hall in self.hall_ids:
+                        if halls.get(hall) == name:
+                            halls[hall] = None
 
 
 def data_dir():
@@ -282,7 +448,10 @@ class Store:
         for folder in (self.directory, app_dir / 'data'):
             if any((folder / name).exists() for name in ('settings.json', 'schedule.json', 'trainings.json')):
                 return migrate_legacy(folder), 'Данные прежней программы открыты. Сохраните проект в новом формате; старые файлы останутся на месте.'
-        return Project(), ''
+        project = Project()
+        project.style.update(studio_name='Моя студия', subtitle='')
+        project.halls = [dict(default_halls()[0], name='Основной зал')]
+        return project, ''
 
     def save(self, project):
         if self.path.exists():

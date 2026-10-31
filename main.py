@@ -14,6 +14,7 @@ from model import (APP_ID, APP_ORG, ALL_DAYS, Project, Store,
                    atomic_json, read_json, migrate_legacy, valid_time, validate_format)
 from rendering import FORMATS, render, save_images
 from colors import text_color, tint
+from studio_ui import StudioWorkflows
 
 Q = QtWidgets
 
@@ -34,7 +35,7 @@ QPushButton:disabled { color: #A7ADBD; background: #F4F5F8; }
 QPushButton#primary { background: #76618F; color: #FFFFFF; border: 1px solid #76618F; }
 QPushButton#primary:hover { background: #65507E; }
 QPushButton#danger { color: #AA4F5C; }
-QLineEdit, QListWidget, QComboBox, QTimeEdit { background: #FFFFFF; border: 1px solid #DDE0E9; border-radius: 8px; padding: 8px; selection-background-color: #E7DFF2; selection-color: #292C3E; }
+QLineEdit, QListWidget, QComboBox, QTimeEdit, QDateEdit, QPlainTextEdit { background: #FFFFFF; border: 1px solid #DDE0E9; border-radius: 8px; padding: 8px; selection-background-color: #E7DFF2; selection-color: #292C3E; }
 QLineEdit:focus, QComboBox:focus, QTimeEdit:focus { border: 1px solid #9980B6; }
 QListWidget::item { padding: 12px; border-radius: 6px; }
 QListWidget::item:selected { background: #EDE6F5; color: #55416C; }
@@ -61,6 +62,11 @@ QScrollBar::handle { background: #C7BCD5; border-radius: 4px; min-height: 20px; 
 QSlider::groove:horizontal { height: 6px; background: #DDE0E9; border-radius: 3px; }
 QSlider::sub-page:horizontal { background: #9375AF; border-radius: 3px; }
 QSlider::handle:horizontal { background: #FFFFFF; border: 2px solid #76618F; width: 16px; margin: -7px 0; border-radius: 9px; }
+QFrame#weekPanel { background: #EDE8F5; border: 1px solid #DDD3EC; border-radius: 12px; }
+QLabel#conflicts { color: #68717D; padding: 8px; background: #EBF2EF; border-radius: 8px; }
+QLabel#conflicts[warning="true"], QLabel#formError { color: #9B5626; background: #FFF1DE; }
+QToolButton { background: #FFFFFF; border: 1px solid #DDE0E9; border-radius: 6px; padding: 5px; }
+QToolButton:hover { background: #EDE6F5; }
 QToolTip { background: #292C3E; color: white; border: none; padding: 7px; }
 '''
 
@@ -126,6 +132,24 @@ class Preview(Q.QLabel):
         super().mouseDoubleClickEvent(event)
 
 
+class SessionCombo(Q.QComboBox):
+    """A multiline selector keeps training names readable in a compact week grid."""
+    def __init__(self):
+        super().__init__()
+        self.setMinimumHeight(54)
+
+    def paintEvent(self, event):
+        option = Q.QStyleOptionComboBox()
+        self.initStyleOption(option)
+        text = option.currentText
+        option.currentText = ''
+        painter = Q.QStylePainter(self)
+        painter.drawComplexControl(Q.QStyle.CC_ComboBox, option)
+        rect = self.style().subControlRect(Q.QStyle.CC_ComboBox, option, Q.QStyle.SC_ComboBoxEditField, self)
+        painter.setPen(self.palette().color(QtGui.QPalette.Text))
+        painter.drawText(rect.adjusted(3, 1, -2, -1), QtCore.Qt.AlignVCenter | QtCore.Qt.TextWordWrap, text)
+
+
 class RenderJob(QtCore.QThread):
     succeeded = QtCore.Signal(object)
     failed = QtCore.Signal(str)
@@ -150,7 +174,7 @@ class RenderJob(QtCore.QThread):
             self.failed.emit(str(error))
 
 
-class MainWindow(Q.QMainWindow):
+class MainWindow(StudioWorkflows, Q.QMainWindow):
     def __init__(self, store=None, start_preview=True):
         super().__init__()
         self.store = store or Store()
@@ -163,7 +187,8 @@ class MainWindow(Q.QMainWindow):
         self.images, self.page = [], 0
         self.loading = False
         self.setWindowTitle('Богини — студия расписаний[*]')
-        self.resize(1500, 940)
+        area = Q.QApplication.primaryScreen().availableGeometry()
+        self.resize(min(1500, max(1060, area.width() - 60)), min(940, max(650, area.height() - 60)))
         self.setMinimumSize(1060, 650)
         self.setPalette(light_palette())
         self.setStyleSheet(STYLE)
@@ -178,7 +203,7 @@ class MainWindow(Q.QMainWindow):
         self.setup_ui()
         self.setup_menu()
         self.refresh_all()
-        self.statusBar().showMessage(notice or 'Выберите тренировку в ячейке. Изменения сохраняются автоматически.')
+        self.statusBar().showMessage(notice or 'Выберите занятие из списка. Кнопка ⋯ открывает время и сведения. Всё сохраняется автоматически.')
         if notice:
             QtCore.QTimer.singleShot(0, lambda: Q.QMessageBox.information(self, 'Открытие данных', notice))
         if start_preview:
@@ -198,13 +223,13 @@ class MainWindow(Q.QMainWindow):
         self.brand_label = label('', 'brand')
         self.brand_label.setTextFormat(QtCore.Qt.PlainText)
         branding.addWidget(self.brand_label)
-        heading = label('Ваша неделя в движении', 'title')
+        heading = label('Расписание студии', 'title')
         heading.setWordWrap(False)
         branding.addWidget(heading)
         head.addLayout(branding, 1)
         self.state_label = label('Все изменения сохранены', 'status')
         self.state_label.setWordWrap(False)
-        head.addWidget(self.state_label)
+        branding.addWidget(self.state_label)
         self.undo_btn = button('↶', self.undo)
         self.undo_btn.setToolTip('Отменить действие · Ctrl+Z')
         self.redo_btn = button('↷', self.redo)
@@ -212,7 +237,8 @@ class MainWindow(Q.QMainWindow):
         head.addWidget(self.undo_btn)
         head.addWidget(self.redo_btn)
         head.addWidget(button('Сохранить', self.save))
-        self.export_btn = button('Экспорт картинок', self.export_dialog, True)
+        head.addWidget(button('Текст для чата', self.show_publication))
+        self.export_btn = button('Сохранить картинки', self.export_dialog, True)
         head.addWidget(self.export_btn)
         root.addWidget(header)
         body = Q.QSplitter(QtCore.Qt.Horizontal)
@@ -224,7 +250,9 @@ class MainWindow(Q.QMainWindow):
         self.tabs.addTab(self.make_studio_tab(), 'Студия и залы')
         self.tabs.addTab(self.make_formats_tab(), 'Форматы')
         body.addWidget(self.tabs)
-        body.addWidget(self.make_preview_panel())
+        self.preview_panel = self.make_preview_panel()
+        body.addWidget(self.preview_panel)
+        self.preview_panel.setVisible(self.width() >= 1440)
         body.setStretchFactor(0, 4)
         body.setStretchFactor(1, 2)
         body.setSizes([990, 410])
@@ -271,7 +299,10 @@ class MainWindow(Q.QMainWindow):
         self.count_label = label('', 'muted')
         self.count_label.setWordWrap(False)
         row.addWidget(self.count_label)
+        self.preview_toggle = button('Показать / скрыть макет', self.toggle_preview_panel)
+        row.addWidget(self.preview_toggle)
         layout.addLayout(row)
+        layout.addWidget(self.week_controls())
         days = Q.QHBoxLayout()
         self.day_checks = {}
         for day, short in zip(ALL_DAYS, ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']):
@@ -303,6 +334,8 @@ class MainWindow(Q.QMainWindow):
         self.table.setEditTriggers(Q.QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setMinimumWidth(70)
         layout.addWidget(self.table, 1)
+        self.conflict_label = label('', 'conflicts')
+        layout.addWidget(self.conflict_label)
         bottom = Q.QHBoxLayout()
         bottom.addWidget(label('Занятия и оформление сохраняются автоматически.', 'muted'))
         bottom.addStretch()
@@ -345,7 +378,7 @@ class MainWindow(Q.QMainWindow):
         self.style_fields = {}
         for key, title, placeholder in [
             ('title', 'Заголовок', 'Расписание занятий'),
-            ('subtitle', 'Подзаголовок', 'Женский фитнес-центр «Богини»'),
+            ('subtitle', 'Подзаголовок', 'Например: движение в удовольствие'),
             ('period', 'Период', 'Например: 2–8 ноября'),
             ('contact', 'Подпись внизу', 'Телефон, адрес или запись на тренировку')]:
             field = Q.QLineEdit()
@@ -410,6 +443,7 @@ class MainWindow(Q.QMainWindow):
         studio.textEdited.connect(lambda text: self.change_style('studio_name', text))
         self.style_fields['studio_name'] = studio
         layout.addWidget(studio)
+        layout.addWidget(self.optional_fields_panel())
         layout.addSpacing(18)
         layout.addWidget(label('Залы и цвета', 'section'))
         layout.addWidget(label('Каждый зал получает свою строку в редакторе. Цвет текста на картинках подбирается автоматически.', 'muted'))
@@ -633,6 +667,9 @@ class MainWindow(Q.QMainWindow):
         layout.addWidget(button('Крупный просмотр', self.large_preview))
         return frame
 
+    def toggle_preview_panel(self):
+        self.preview_panel.setVisible(not self.preview_panel.isVisible())
+
     def remember(self):
         self.undo_history.append(self.project.to_dict())
         self.undo_history = self.undo_history[-100:]
@@ -650,11 +687,12 @@ class MainWindow(Q.QMainWindow):
     def update_status(self):
         studio = self.project.style.get('studio_name', 'Богини').strip() or 'Студия'
         self.setWindowTitle(studio + ' — студия расписаний[*]')
-        self.brand_label.setText(studio.upper() + ' / STUDIO PLANNER')
+        self.brand_label.setText(studio.upper())
         dirty = self.project.to_dict() != self.saved
         self.state_label.setText('Сохраняем…' if dirty else 'Все изменения сохранены')
         self.setWindowModified(dirty)
-        self.count_label.setText(f'{self.project.count()} занятий · {len(self.project.times)} временных слотов')
+        self.count_label.setText(f'{self.project.count()} занятий')
+        self.update_conflicts()
         self.undo_btn.setEnabled(bool(self.undo_history))
         self.redo_btn.setEnabled(bool(self.redo_history))
 
@@ -674,6 +712,7 @@ class MainWindow(Q.QMainWindow):
             for key, slider in self.transparency_sliders.items():
                 slider.setValue(self.project.style[key])
             self.refresh_settings_lists()
+            self.refresh_week_controls()
             self.build_table()
         finally:
             self.loading = False
@@ -683,11 +722,11 @@ class MainWindow(Q.QMainWindow):
         self.table.clear()
         self.table.setRowCount(len(self.project.times))
         self.table.setColumnCount(len(self.project.days))
-        self.table.setHorizontalHeaderLabels(self.project.days)
+        self.table.setHorizontalHeaderLabels([self.project.day_title(d) for d in self.project.days])
         self.table.setVerticalHeaderLabels(self.project.times)
         self.table.horizontalHeader().setMinimumSectionSize(145)
         self.table.horizontalHeader().setSectionResizeMode(Q.QHeaderView.Stretch)
-        self.table.verticalHeader().setDefaultSectionSize(max(92, 14 + len(self.project.halls) * 40))
+        self.table.verticalHeader().setDefaultSectionSize(max(78, 14 + len(self.project.halls) * 62))
         self.cell_combos = {}
         for column, day in enumerate(self.project.days):
             self.table.setColumnWidth(column, 200)
@@ -699,20 +738,30 @@ class MainWindow(Q.QMainWindow):
                 layout.setSpacing(6)
                 for hall_info in self.project.halls:
                     hall = hall_info['id']
-                    combo = Q.QComboBox()
+                    combo = SessionCombo()
                     combo.setSizePolicy(Q.QSizePolicy.Ignored, Q.QSizePolicy.Fixed)
                     combo.setMinimumContentsLength(8)
                     combo.addItem('＋ Занятие', '')
                     for name in sorted(self.project.trainings, key=str.casefold):
                         combo.addItem(name, name)
+                    combo.addItem('＋ Новая тренировка…', None)
                     combo.setCurrentIndex(max(0, combo.findData(self.project.get(day, time, hall))))
                     combo.setToolTip(hall_info['name'] + ' · ' + day + ' · ' + time + '\n'
-                                     + (self.project.get(day, time, hall) or 'Нет занятия'))
+                                     + (self.project.session_text(day, time, hall) or 'Нет занятия'))
                     color, border = tint(hall_info['color']), hall_info['color']
                     combo.setStyleSheet(f'QComboBox {{ background: {color}; color: #292C3E; border: 1px solid {border}; padding: 7px; font-size: 12px; }} QComboBox QAbstractItemView {{ background: #FFFFFF; color: #292C3E; selection-background-color: #E7DFF2; selection-color: #292C3E; }}')
                     combo.currentIndexChanged.connect(
                         lambda _, d=day, t=time, h=hall, w=combo: self.assign(d, t, h, w.currentData()))
-                    layout.addWidget(combo)
+                    line = Q.QHBoxLayout()
+                    line.setSpacing(3)
+                    line.addWidget(combo, 1)
+                    edit = Q.QToolButton()
+                    edit.setText('⋯')
+                    edit.setAccessibleName(f'Изменить занятие: {day}, {time}, {hall_info["name"]}')
+                    edit.setToolTip('Изменить время, сведения или отменить занятие')
+                    edit.clicked.connect(lambda checked=False, d=day, t=time, h=hall: self.edit_session(d, t, h))
+                    line.addWidget(edit)
+                    layout.addLayout(line)
                     self.cell_combos[(day, time, hall)] = combo
                 self.table.setCellWidget(row, column, cell)
         if not self.project.trainings:
@@ -726,6 +775,13 @@ class MainWindow(Q.QMainWindow):
             self.table.setRowHidden(row, self.hide_empty.isChecked() and empty)
 
     def assign(self, day, time, hall, name):
+        if not self.loading and name is None:
+            combo = self.cell_combos[(day, time, hall)]
+            blocker = QtCore.QSignalBlocker(combo)
+            combo.setCurrentIndex(max(0, combo.findData(self.project.get(day, time, hall))))
+            del blocker
+            self.edit_session(day, time, hall)
+            return
         if self.loading or self.project.get(day, time, hall) == (name or ''):
             return
         self.remember()
@@ -793,8 +849,9 @@ class MainWindow(Q.QMainWindow):
             return
         self.remember()
         self.project.times.remove(time)
-        for slots in self.project.schedule.values():
-            slots.pop(time, None)
+        for collection in (self.project.schedule, self.project.details):
+            for slots in collection.values():
+                slots.pop(time, None)
         self.changed(refresh=True)
 
     def filter_trainings(self, text):
@@ -856,12 +913,14 @@ class MainWindow(Q.QMainWindow):
         if dialog.exec() == Q.QDialog.Accepted and source.currentText() != target.currentText():
             self.remember()
             self.project.schedule[target.currentText()] = copy.deepcopy(self.project.schedule.get(source.currentText(), {}))
+            self.project.details[target.currentText()] = copy.deepcopy(self.project.details.get(source.currentText(), {}))
             self.changed(refresh=True)
 
     def clear_week(self):
         if self.confirm('Очистить расписание?', 'Удалить занятия всех семи дней? Названия тренировок, время и оформление останутся. Действие можно отменить.'):
             self.remember()
             self.project.schedule.clear()
+            self.project.details.clear()
             self.changed(refresh=True)
 
     def undo(self):
@@ -1094,7 +1153,7 @@ class MainWindow(Q.QMainWindow):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Богини — студия расписаний')
+    parser = argparse.ArgumentParser(description='Студия расписаний — редактор для фитнес-студии')
     parser.add_argument('--export-demo', type=Path, metavar='ПАПКА', help='Сохранить примеры всех форматов без изменения вашего проекта')
     arguments = parser.parse_args()
     if arguments.export_demo:
@@ -1110,7 +1169,8 @@ def main():
     app = Q.QApplication(sys.argv)
     app.setOrganizationName(APP_ORG)
     app.setApplicationName(APP_ID)
-    app.setApplicationDisplayName('Богини — студия расписаний')
+    app.setApplicationDisplayName('Студия расписаний')
+    app.setApplicationVersion('3.0.0')
     app.setStyle('Fusion')
     app.setPalette(light_palette())
     try:
