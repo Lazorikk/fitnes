@@ -1,0 +1,2 @@
+# Preserve Windows CRLF bytes in source ZIP archives.
+*.bat -text whitespace=cr-at-eol
